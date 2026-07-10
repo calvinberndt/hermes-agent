@@ -577,6 +577,7 @@ def aggregate_moa_context(
     temperature: float | None = None,
     aggregator_temperature: float | None = None,
     max_tokens: int | None = None,
+    reasoning_config: dict[str, Any] | None = None,
 ) -> str:
     """Run configured reference models and synthesize their advice.
 
@@ -593,6 +594,10 @@ def aggregate_moa_context(
     like max_tokens, ``call_llm`` omits temperature when None so the
     provider default applies — matching single-model agent behavior. Presets
     may still pin explicit values.
+
+    ``reasoning_config`` applies only to the aggregator. Reference models keep
+    their provider defaults because they are advisory slots, not the acting
+    parent agent.
     """
     reference_outputs: list[tuple[str, str, Any]] = []
     ref_messages = _reference_messages(api_messages)
@@ -638,6 +643,7 @@ def aggregate_moa_context(
             messages=agg_messages,
             temperature=aggregator_temperature,
             max_tokens=max_tokens,
+            reasoning_config=reasoning_config,
             **agg_runtime,
         )
         synthesis = _extract_text(response)
@@ -683,8 +689,14 @@ def _attach_reference_guidance(agg_messages: list[dict[str, Any]], guidance: str
 class MoAChatCompletions:
     """OpenAI-chat-compatible facade where the aggregator is the acting model."""
 
-    def __init__(self, preset_name: str, reference_callback: Any = None):
+    def __init__(
+        self,
+        preset_name: str,
+        reference_callback: Any = None,
+        reasoning_config: dict[str, Any] | None = None,
+    ):
         self.preset_name = preset_name or "default"
+        self.reasoning_config = reasoning_config
         # Optional display hook. Called as reference outputs become available so
         # frontends can show each reference model's answer as a labelled block
         # before the aggregator acts. Signature:
@@ -1010,11 +1022,15 @@ class MoAChatCompletions:
             # actually governs the aggregator stream, not just call_llm's default.
             if api_kwargs.get("timeout") is not None:
                 stream_kwargs["timeout"] = api_kwargs["timeout"]
+        reasoning_config = agg_kwargs.get("reasoning_config")
+        if reasoning_config is None:
+            reasoning_config = self.reasoning_config
         _agg_response = call_llm(
             task="moa_aggregator",
             messages=agg_messages,
             temperature=aggregator_temperature,
             max_tokens=agg_kwargs.get("max_tokens"),
+            reasoning_config=reasoning_config,
             tools=agg_kwargs.get("tools"),
             extra_body=agg_kwargs.get("extra_body"),
             **stream_kwargs,
@@ -1039,9 +1055,18 @@ class MoAChatCompletions:
 
 
 class MoAClient:
-    def __init__(self, preset_name: str, reference_callback: Any = None):
+    def __init__(
+        self,
+        preset_name: str,
+        reference_callback: Any = None,
+        reasoning_config: dict[str, Any] | None = None,
+    ):
         self.chat = type("_MoAChat", (), {})()
-        self.chat.completions = MoAChatCompletions(preset_name, reference_callback=reference_callback)
+        self.chat.completions = MoAChatCompletions(
+            preset_name,
+            reference_callback=reference_callback,
+            reasoning_config=reasoning_config,
+        )
 
     def consume_reference_usage(self) -> Any:
         """Pop the pending reference-fan-out usage from the completions facade.
