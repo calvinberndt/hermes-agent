@@ -10,6 +10,7 @@ import subprocess
 import sys
 import textwrap
 import threading
+import time
 
 import pytest
 import yaml
@@ -83,19 +84,32 @@ def test_profile_local_mcp_tool_is_visible_in_slash_worker(tmp_path):
         assert proc.stdin is not None
         assert proc.stdout is not None
         stdout = proc.stdout
-        threading.Thread(
-            target=lambda: output.put(stdout.readline()),
-            daemon=True,
-        ).start()
-        proc.stdin.write(json.dumps({"id": 1, "command": "/tools"}) + "\n")
-        proc.stdin.flush()
-        try:
-            line = output.get(timeout=30)
-        except queue.Empty:
-            pytest.fail("slash worker produced no /tools response within 30 seconds")
-        response = json.loads(line)
-        assert response["ok"] is True
-        assert "mcp__profileprobe__hermes_61922_profile_probe" in response["output"]
+        def _read_stdout() -> None:
+            for line in stdout:
+                output.put(line)
+
+        threading.Thread(target=_read_stdout, daemon=True).start()
+        expected_tool = "mcp__profileprobe__hermes_61922_profile_probe"
+        deadline = time.monotonic() + 30
+        response = None
+        request_id = 0
+        while time.monotonic() < deadline:
+            request_id += 1
+            proc.stdin.write(json.dumps({"id": request_id, "command": "/tools"}) + "\n")
+            proc.stdin.flush()
+            try:
+                line = output.get(timeout=max(0.1, deadline - time.monotonic()))
+            except queue.Empty:
+                break
+            response = json.loads(line)
+            assert response["ok"] is True
+            if expected_tool in response["output"]:
+                break
+            time.sleep(0.1)
+        else:
+            pytest.fail("profile-local MCP tool was not discovered within 30 seconds")
+        assert response is not None
+        assert expected_tool in response["output"]
     finally:
         proc.terminate()
         try:
